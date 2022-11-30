@@ -69,14 +69,27 @@ object UpdateGeneric {
           }
         }
       }
+
+      implicit def seq[V](implicit updater: Updater[V]):Updater.ToTraverse[Seq[V]] = new Updater.ToTraverse[Seq[V]] {
+        override def using[W](v: Seq[V], tx: (Path, X) => Either[W, X], base: Path): Transformed[Seq[V], W] = {
+
+          updater match {
+            case tt:Updater.ToTraverse[V] =>
+              val vs = v.map(v => tt.using(v,tx, Path.Sequential(base)))
+              Transformed(vs.map(_.result), vs.flatMap(_.warnings))
+            case _ => Transformed(v, Nil)
+          }
+
+        }
+      }
     }
 
     object Updater extends UpdaterLowPriority1 {
 
-
       implicit case object ToUpdate extends Updater[X]
 
       class ToSkip[V] extends Updater[V]
+
 
       trait ToTraverse[V] extends Updater[V] {
         def using[W](v:V , tx: (Path, X) => Either[W, X], base:Path): Transformed[V,W]
@@ -167,6 +180,13 @@ object UpdateGenericWithReflexion {
                     } else {
                       Transformed(x, Nil)
                     }
+                  } else if (rt <:< typeOf[Seq[Any]]) {
+                    if(rt.typeArgs.head.typeSymbol.asClass.isCaseClass) {
+                     val seq =  x.asInstanceOf[Seq[Any]].map(x => transform(x, rt.typeArgs.head))
+                      Transformed(seq.map(_.result), seq.flatMap(_.warnings))
+                    } else {
+                      Transformed(x, Nil)
+                    }
                   } else if (rt.typeSymbol.asClass.isCaseClass) {
                     transform(x, rt)
                   } else {
@@ -191,9 +211,30 @@ object UpdateGenericWithReflexion {
 }
 
 
+
+
 case class SomeObjectA(toto:Option[String], titi:Int, tata: Option[Int], inner:Option[SomeObjectB])
 
 case class SomeObjectB(tutu:Option[String])
+
+case class SomeObjectC(b1:SomeObjectB, as:Seq[SomeObjectA])
+
+object Objects {
+
+
+  val b: SomeObjectB = SomeObjectB(Some("tutu"))
+  val a: SomeObjectA = SomeObjectA(Some("toto"), 0, Some(1), Some(b))
+  val c: SomeObjectC = SomeObjectC(b, Seq(a))
+
+
+  object OptionStringToNone {
+    val b: SomeObjectB = SomeObjectB(None)
+    val a: SomeObjectA = SomeObjectA(None, 0, Some(1), Some(b))
+    val c: SomeObjectC = SomeObjectC(b, Seq(a))
+  }
+
+}
+
 
 
 /**
@@ -203,35 +244,30 @@ case class SomeObjectB(tutu:Option[String])
  */
 object TestSyntaxManifest {
 
-  private val b: SomeObjectB = SomeObjectB(Some("tutu"))
-  val a: SomeObjectA = SomeObjectA(Some("toto"), 0, Some(1), Some(b))
+
+  import Objects._
 
   private val plop: UpdateGenericWithReflexion.On[Option[String]] = UpdateGenericWithReflexion.on[Option[String]]
 
+  private val res3 = plop.updateSome(c).using((_, _) => Right(None))
 
-  val res2 = plop.updateSome(a).using((_, _) => Right(None))
-
-  val res: Transformed[SomeObjectB, Int] =
-    plop.updateSome(b).using[Int]((p, x) => {
-      Right(None)
-    })
+  private val res2 = plop.updateSome(a).using((_, _) => Right(None))
+  private  val res = plop.updateSome(b).using((p, x) => Right(None))
 
   def main(args: Array[String]): Unit = {
     assert(res.result == b.copy(None))
-
     assert(res2.result == a.copy(None, inner = a.inner.map(_.copy(None))))
-
+    assert(res3.result == OptionStringToNone.c)
   }
 
 }
 
 object TestSyntax {
 
-  val a: SomeObjectA = SomeObjectA(Some("toto"), 0, Some(1), Some(SomeObjectB(Some("tutu"))))
+  import Objects._
+
   private val opt: UpdateGeneric.On[Option[String]] = UpdateGeneric.on[Option[String]]
 
-  opt.Updater.gen[SomeObjectB]
-  opt.Updater.gen[SomeObjectA]
 
 
   def main(args: Array[String]): Unit = {
@@ -244,6 +280,13 @@ object TestSyntax {
     }).result
 
     assert(result == a.copy(None))
+
+
+   // implicit val bTrv = opt.Updater.gen[SomeObjectB]
+    val result1 = opt.updateSome(c).using((_, _) => Right(None)).result
+    assert(result1 == OptionStringToNone.c)
+
+
   }
 }
 
