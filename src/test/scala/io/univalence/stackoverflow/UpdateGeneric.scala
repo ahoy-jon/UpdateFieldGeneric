@@ -2,6 +2,8 @@ package io.univalence.stackoverflow
 
 
 
+import io.univalence.stackoverflow.Path.Root
+
 import language.experimental.macros
 import magnolia1._
 
@@ -47,7 +49,6 @@ object UpdateGeneric {
     trait UpdateSome[V] {
         def using[W](tx: (Path, X) => Either[W, X]): Transformed[V,W]
     }
-
 
     sealed trait Updater[V]
 
@@ -96,7 +97,6 @@ object UpdateGeneric {
                 e.get.fold(w => Transformed(x, List(w)), x => Transformed(x, Nil))
             }
           })
-
           Transformed(ctx.rawConstruct(all.map(_.result))  ,all.flatMap(_.warnings))
         }
       }
@@ -112,15 +112,10 @@ object UpdateGeneric {
 object UpdateGenericWithReflexion {
   import scala.reflect.runtime.universe._
 
-
-
   class On[X:TypeTag] {
-
-
     trait UpdateSome[V] {
       def using[W](tx: (Path, X) => Either[W, X]): Transformed[V,W]
     }
-
 
     def updateSome[V:TypeTag](v:V):UpdateSome[V] = new UpdateSome[V] {
       override def using[W](tx: (Path, X) => Either[W, X]): Transformed[V, W] = {
@@ -129,38 +124,65 @@ object UpdateGenericWithReflexion {
           ClassTag[T]( typeTag[T].mirror.runtimeClass( typeTag[T].tpe ) )
         }
 
-        val valueTag = implicitly[TypeTag[V]]
-        val targetType = implicitly[TypeTag[X]]
+        val targetTT = implicitly[TypeTag[X]]
+        val mirror = targetTT.mirror
 
-        val tv: universe.Type = typeOf[V]
+        def transform[VV](vv:VV, tpe:universe.Type):Transformed[VV, W] = {
+          implicit val ict: ClassTag[VV] = ClassTag[VV](mirror.runtimeClass(tpe))
+          //val tpe: universe.Type = tt.tpe
 
-        val copy = tv.members.collectFirst({
-          case s:MethodSymbol if s.name.toString == "copy" => s
-        })
+          val constructor: Option[universe.MethodSymbol] = tpe.members.collectFirst({
+            case s: MethodSymbol if s.isConstructor => s
+          })
 
-        val mirror = targetType.mirror
+          constructor match {
+            case None => Transformed(vv, Nil)
+            case _ if !tpe.typeSymbol.asClass.isCaseClass => Transformed(vv, Nil)
+            case Some(constructor)  =>
+              val const: universe.MethodMirror = mirror.reflectClass(tpe.typeSymbol.asClass).reflectConstructor(constructor)
+              val names = constructor.paramLists.head.map(_.name.toString)
 
-        val reflectCopy = mirror.reflect(v).reflectMethod(copy.get.asMethod)
+              val fields = tpe.members.collect({
+                case f: MethodSymbol if f.isCaseAccessor => f
+              }).toSeq.sortBy(m => {
+                val name = m.name.toString
+                names.indexOf(name)
+              })
 
-        val constructor = tv.members.collectFirst({
-          case s:MethodSymbol if s.isConstructor => s
-        })
+              val reflectedV: universe.InstanceMirror = mirror.reflect(vv)
 
-        val const = mirror.reflectClass(valueTag.tpe.typeSymbol.asClass).reflectConstructor(constructor.get)
+              val transformedFields: Seq[Transformed[Any, W]] = fields.map(f => {
+                val rt: universe.Type = f.returnType
+                val x = reflectedV.reflectMethod(f)()
+                if (rt =:= targetTT.tpe) {
+                  scala.util.Try(tx(Root, x.asInstanceOf[X])).recover({ case _: MatchError => Right(x) }).get.fold(w =>
+                    Transformed(x, Seq(w)), x => Transformed(x, Nil))
+                } else {
+                  if(rt <:< typeOf[Option[Any]]) {
+                    if(rt.typeArgs.head.typeSymbol.asClass.isCaseClass) {
+                      x.asInstanceOf[Option[Any]] match {
+                        case None => Transformed(None, Nil)
+                        case Some(x) => transform(x, rt.typeArgs.head).map(x => Some(x))
+                      }
+                    } else {
+                      Transformed(x, Nil)
+                    }
+                  } else if (rt.typeSymbol.asClass.isCaseClass) {
+                    transform(x, rt)
+                  } else {
+                    Transformed(x, Nil)
+                  }
+                }
+              })
 
+              val newNewV = const(transformedFields.map(_.result): _*).asInstanceOf[VV]
+              Transformed(newNewV, transformedFields.flatMap(_.warnings))
+          }
+        }
 
-        val newV = reflectCopy.apply(None).asInstanceOf[V]
-
-
-        val newNewV = const(None).asInstanceOf[V]
-
-
-        valueTag.tpe
-
-        Transformed(newNewV, Nil)
+        transform(v, implicitly[TypeTag[V]].tpe)
       }
     }
-
   }
 
 
@@ -176,8 +198,6 @@ case class SomeObjectB(tutu:Option[String])
 
 /**
  * Todo
- * * change the order of the DSL UpdateGeneric.On[Option[String].using({case (_, Some("toto")) => Right(None)}).update(v)
- * * try the reflexion based version
  * * check the Path construction
  *
  */
@@ -188,14 +208,18 @@ object TestSyntaxManifest {
 
   private val plop: UpdateGenericWithReflexion.On[Option[String]] = UpdateGenericWithReflexion.on[Option[String]]
 
+
+  val res2 = plop.updateSome(a).using((_, _) => Right(None))
+
   val res: Transformed[SomeObjectB, Int] =
     plop.updateSome(b).using[Int]((p, x) => {
       Right(None)
     })
 
-
   def main(args: Array[String]): Unit = {
     assert(res.result == b.copy(None))
+
+    assert(res2.result == a.copy(None, inner = a.inner.map(_.copy(None))))
 
   }
 
@@ -219,13 +243,8 @@ object TestSyntax {
       case (path, _) if path.depth < 2 => Right(None)
     }).result
 
-
     assert(result == a.copy(None))
-
   }
-
-
-
 }
 
 
